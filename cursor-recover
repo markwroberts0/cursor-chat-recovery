@@ -3,7 +3,7 @@
 Cursor Chat Recovery CLI
 Recover conversations, plans, and chat history from Cursor's local database.
 
-https://github.com/yourusername/cursor-chat-recovery
+https://github.com/markwroberts0/cursor-chat-recovery
 """
 
 import os
