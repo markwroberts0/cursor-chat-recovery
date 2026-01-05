@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""
+Cursor Chat Recovery CLI
+Recover conversations, plans, and chat history from Cursor's local database.
+
+https://github.com/yourusername/cursor-chat-recovery
+"""
+
+import os
+import sys
+import json
+import sqlite3
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+__version__ = "1.0.0"
+
+# ANSI color codes
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+
+# Database paths (macOS)
+DB_PATH = os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+DB_PATH_BACKUP = os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/state.vscdb.backup")
+
+# Windows path (untested)
+if sys.platform == "win32":
+    DB_PATH = os.path.expanduser("~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb")
+    DB_PATH_BACKUP = os.path.expanduser("~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb.backup")
+
+# Linux path (untested)
+elif sys.platform == "linux":
+    DB_PATH = os.path.expanduser("~/.config/Cursor/User/globalStorage/state.vscdb")
+    DB_PATH_BACKUP = os.path.expanduser("~/.config/Cursor/User/globalStorage/state.vscdb.backup")
+
+
+def clear_screen():
+    os.system('clear' if os.name != 'nt' else 'cls')
+
+
+def print_header():
+    print(f"""
+{Colors.CYAN}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
+║              🔄 Cursor Chat Recovery CLI v{__version__}               ║
+╚══════════════════════════════════════════════════════════════╝{Colors.RESET}
+""")
+
+
+def get_choice(prompt: str, max_val: int) -> int:
+    """Get a numeric choice from user."""
+    while True:
+        try:
+            choice = input(f"\n{Colors.CYAN}{prompt}{Colors.RESET} ")
+            if choice.lower() == 'q':
+                return -1
+            num = int(choice)
+            if 1 <= num <= max_val:
+                return num
+            print(f"{Colors.RED}Please enter a number between 1 and {max_val}{Colors.RESET}")
+        except ValueError:
+            print(f"{Colors.RED}Please enter a valid number{Colors.RESET}")
+
+
+def get_db_connection(use_backup: bool = False) -> Optional[sqlite3.Connection]:
+    """Get a database connection."""
+    db_path = DB_PATH_BACKUP if use_backup else DB_PATH
+    if not os.path.exists(db_path):
+        print(f"{Colors.RED}Database not found: {db_path}{Colors.RESET}")
+        print(f"{Colors.DIM}Make sure Cursor is installed and has been used at least once.{Colors.RESET}")
+        return None
+    
+    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+    conn.text_factory = bytes
+    return conn
+
+
+def list_conversations(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """List all conversations in the database."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT key, value, LENGTH(value) as size
+        FROM cursorDiskKV
+        WHERE key LIKE 'composerData:%';
+    """)
+    
+    conversations = []
+    for row in cursor.fetchall():
+        key, value, size = row
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        
+        if value is None:
+            continue
+        
+        try:
+            data = json.loads(value.decode("utf-8"))
+            composer_id = key.split(":", 1)[1] if ":" in key else "unknown"
+            name = data.get("name", "(unnamed)")
+            created_at = data.get("createdAt")
+            headers = data.get("fullConversationHeadersOnly", [])
+            msg_count = len(headers)
+            
+            created_str = ""
+            if created_at:
+                try:
+                    if created_at > 1e10:
+                        created_str = datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d %H:%M")
+                    else:
+                        created_str = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+                except:
+                    pass
+            
+            if msg_count > 0:  # Only show conversations with messages
+                conversations.append({
+                    "id": composer_id,
+                    "name": name,
+                    "created": created_str,
+                    "created_ts": created_at or 0,
+                    "msg_count": msg_count,
+                    "size": size,
+                    "data": data
+                })
+        except:
+            pass
+    
+    # Sort by date (most recent first)
+    conversations.sort(key=lambda x: x["created_ts"], reverse=True)
+    
+    return conversations
+
+
+def get_bubbles(conn: sqlite3.Connection, composer_id: str) -> Dict[str, Any]:
+    """Get all bubble data for a composer."""
+    cursor = conn.cursor()
+    pattern = f"bubbleId:{composer_id}:%"
+    cursor.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE ?", (pattern,))
+    
+    bubbles = {}
+    for row in cursor.fetchall():
+        key, value = row
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        bubble_id = key.split(":")[-1]
+        if value:
+            try:
+                bubbles[bubble_id] = json.loads(value.decode("utf-8"))
+            except:
+                pass
+    return bubbles
+
+
+def format_tool_call(tool_data: Dict[str, Any]) -> str:
+    """Format a tool call for display."""
+    tool_name = tool_data.get("name", "unknown")
+    raw_args = tool_data.get("rawArgs", "")
+    
+    result = f"\n{Colors.YELLOW}🔧 Tool: {tool_name}{Colors.RESET}\n"
+    
+    if raw_args:
+        try:
+            args = json.loads(raw_args)
+            
+            if tool_name == "create_plan":
+                result += f"\n{Colors.BOLD}📋 Plan: {args.get('name', '')}{Colors.RESET}\n"
+                result += f"{args.get('overview', '')}\n"
+                plan_content = args.get('plan', '')
+                if len(plan_content) > 500:
+                    result += f"\n{plan_content[:500]}...\n"
+                else:
+                    result += f"\n{plan_content}\n"
+                todos = args.get("todos", [])
+                if todos:
+                    result += f"\n{Colors.BOLD}To-Dos:{Colors.RESET}\n"
+                    for todo in todos[:5]:
+                        result += f"  ☐ {todo.get('content', '')}\n"
+                    if len(todos) > 5:
+                        result += f"  {Colors.DIM}... and {len(todos) - 5} more{Colors.RESET}\n"
+            
+            elif tool_name in ["edit_file", "create_file", "write_to_file", "str_replace_editor"]:
+                file_path = args.get("target_file") or args.get("path") or args.get("file_path", "")
+                result += f"📄 File: {Colors.CYAN}{file_path}{Colors.RESET}\n"
+                content = args.get("content") or args.get("contents") or args.get("new_str", "")
+                if content and len(content) > 200:
+                    result += f"{Colors.DIM}{content[:200]}...{Colors.RESET}\n"
+                elif content:
+                    result += f"{Colors.DIM}{content}{Colors.RESET}\n"
+            
+            elif tool_name == "run_terminal_cmd":
+                result += f"$ {Colors.GREEN}{args.get('command', '')}{Colors.RESET}\n"
+            
+            elif tool_name == "ask_question":
+                title = args.get("title", "")
+                result += f"❓ {title}\n"
+                for q in args.get("questions", [])[:3]:
+                    result += f"  • {q.get('prompt', '')}\n"
+            
+            elif tool_name == "todo_write":
+                todos = args.get("todos", [])
+                if todos:
+                    result += "📝 Updating to-dos:\n"
+                    for todo in todos[:5]:
+                        status = todo.get("status", "pending")
+                        icon = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(status, "⬜")
+                        result += f"  {icon} {todo.get('content', '')[:50]}\n"
+            
+            else:
+                args_str = json.dumps(args, indent=2)
+                if len(args_str) > 300:
+                    result += f"{Colors.DIM}{args_str[:300]}...{Colors.RESET}\n"
+                else:
+                    result += f"{Colors.DIM}{args_str}{Colors.RESET}\n"
+        except:
+            pass
+    
+    return result
+
+
+def display_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], full: bool = False) -> None:
+    """Display a conversation."""
+    headers = conv["data"].get("fullConversationHeadersOnly", [])
+    
+    print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}{conv['name']}{Colors.RESET}")
+    print(f"{Colors.DIM}Created: {conv['created']} | Messages: {conv['msg_count']}{Colors.RESET}")
+    print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\n")
+    
+    display_count = len(headers) if full else min(10, len(headers))
+    
+    for i, header in enumerate(headers[:display_count]):
+        bubble_id = header.get("bubbleId")
+        msg_type = header.get("type")
+        bubble = bubbles.get(bubble_id, {})
+        
+        if msg_type == 1:
+            speaker = f"{Colors.BLUE}👤 You{Colors.RESET}"
+        else:
+            speaker = f"{Colors.GREEN}🤖 AI{Colors.RESET}"
+        
+        print(f"\n{Colors.BOLD}[{i+1}]{Colors.RESET} {speaker}")
+        
+        text = bubble.get("text", "")
+        if text:
+            if len(text) > 500 and not full:
+                print(f"{text[:500]}...")
+            else:
+                print(text)
+        
+        tool_data = bubble.get("toolFormerData", {})
+        if tool_data and tool_data.get("name"):
+            print(format_tool_call(tool_data))
+        
+        print(f"{Colors.DIM}{'─'*40}{Colors.RESET}")
+    
+    if not full and len(headers) > 10:
+        print(f"\n{Colors.YELLOW}... and {len(headers) - 10} more messages{Colors.RESET}")
+
+
+def export_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], output_path: str) -> None:
+    """Export conversation to markdown file."""
+    headers = conv["data"].get("fullConversationHeadersOnly", [])
+    
+    with open(output_path, "w") as f:
+        f.write(f"# {conv['name']}\n\n")
+        f.write(f"**Exported:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"**Created:** {conv['created']}\n")
+        f.write(f"**Messages:** {conv['msg_count']}\n\n")
+        f.write("---\n\n")
+        
+        for i, header in enumerate(headers, 1):
+            bubble_id = header.get("bubbleId")
+            msg_type = header.get("type")
+            bubble = bubbles.get(bubble_id, {})
+            
+            speaker = "👤 User" if msg_type == 1 else "🤖 Assistant"
+            f.write(f"## [{i}] {speaker}\n\n")
+            
+            ts = bubble.get("createdAt", "")
+            if ts:
+                f.write(f"*{ts}*\n\n")
+            
+            text = bubble.get("text", "")
+            if text:
+                f.write(f"{text}\n\n")
+            
+            tool_data = bubble.get("toolFormerData", {})
+            if tool_data and tool_data.get("name"):
+                tool_name = tool_data.get("name", "unknown")
+                raw_args = tool_data.get("rawArgs", "")
+                
+                f.write(f"### 🔧 Tool Call: `{tool_name}`\n\n")
+                
+                if raw_args:
+                    try:
+                        args = json.loads(raw_args)
+                        
+                        if tool_name == "create_plan":
+                            f.write(f"#### 📋 Plan: {args.get('name', '')}\n\n")
+                            f.write(f"**Overview:** {args.get('overview', '')}\n\n")
+                            f.write(f"{args.get('plan', '')}\n\n")
+                            todos = args.get("todos", [])
+                            if todos:
+                                f.write("#### To-Do Items:\n\n")
+                                for todo in todos:
+                                    f.write(f"- [ ] **{todo.get('id')}**: {todo.get('content')}\n")
+                                f.write("\n")
+                        
+                        elif tool_name in ["edit_file", "create_file", "write_to_file", "str_replace_editor"]:
+                            file_path = args.get("target_file") or args.get("path") or args.get("file_path", "")
+                            f.write(f"**File:** `{file_path}`\n\n")
+                            content = args.get("content") or args.get("contents") or args.get("new_str", "")
+                            if content:
+                                ext = file_path.split(".")[-1] if "." in file_path else ""
+                                lang_map = {"py": "python", "ts": "typescript", "tsx": "tsx", "js": "javascript", "sql": "sql", "json": "json", "yaml": "yaml", "sh": "bash", "css": "css", "html": "html"}
+                                lang = lang_map.get(ext, "")
+                                if len(content) > 5000:
+                                    f.write(f"```{lang}\n{content[:5000]}\n```\n\n*[truncated - {len(content)} chars total]*\n\n")
+                                else:
+                                    f.write(f"```{lang}\n{content}\n```\n\n")
+                        
+                        elif tool_name == "run_terminal_cmd":
+                            f.write(f"```bash\n{args.get('command', '')}\n```\n\n")
+                        
+                        elif tool_name == "ask_question":
+                            f.write(f"**{args.get('title', '')}**\n\n")
+                            for q in args.get("questions", []):
+                                f.write(f"- {q.get('prompt', '')}\n")
+                                for opt in q.get("options", []):
+                                    f.write(f"  - {opt.get('label', '')}\n")
+                            f.write("\n")
+                        
+                        elif tool_name == "todo_write":
+                            todos = args.get("todos", [])
+                            if todos:
+                                f.write("**Updating To-Dos:**\n\n")
+                                for todo in todos:
+                                    status = todo.get("status", "pending")
+                                    icon = {"pending": "⬜", "in_progress": "🔄", "completed": "✅", "cancelled": "❌"}.get(status, "⬜")
+                                    f.write(f"- {icon} {todo.get('content', '')} *({status})*\n")
+                                f.write("\n")
+                        
+                        else:
+                            args_str = json.dumps(args, indent=2)
+                            if len(args_str) > 3000:
+                                f.write(f"```json\n{args_str[:3000]}\n```\n\n*[truncated]*\n\n")
+                            else:
+                                f.write(f"```json\n{args_str}\n```\n\n")
+                    except:
+                        pass
+            
+            f.write("---\n\n")
+    
+    print(f"\n{Colors.GREEN}✅ Exported to: {output_path}{Colors.RESET}")
+
+
+def extract_plan(conv: Dict[str, Any], bubbles: Dict[str, Any]) -> Optional[Dict]:
+    """Extract plan from conversation if it exists."""
+    headers = conv["data"].get("fullConversationHeadersOnly", [])
+    
+    for header in headers:
+        bubble_id = header.get("bubbleId")
+        bubble = bubbles.get(bubble_id, {})
+        tool_data = bubble.get("toolFormerData", {})
+        
+        if tool_data.get("name") == "create_plan":
+            raw_args = tool_data.get("rawArgs", "")
+            try:
+                return json.loads(raw_args)
+            except:
+                pass
+    return None
+
+
+def save_plan(plan: Dict, output_path: str) -> None:
+    """Save a plan to markdown file."""
+    with open(output_path, "w") as f:
+        f.write(f"# {plan.get('name', 'Plan')}\n\n")
+        f.write(f"## Overview\n\n{plan.get('overview', '')}\n\n")
+        f.write(plan.get('plan', ''))
+        f.write("\n\n## To-Do List\n\n")
+        for todo in plan.get('todos', []):
+            f.write(f"- [ ] **{todo.get('id')}**: {todo.get('content')}\n")
+    
+    print(f"\n{Colors.GREEN}✅ Plan saved to: {output_path}{Colors.RESET}")
+
+
+def main():
+    clear_screen()
+    print_header()
+    
+    # Database selection
+    print(f"{Colors.BOLD}Select database:{Colors.RESET}")
+    print(f"  {Colors.CYAN}1{Colors.RESET}  Main database")
+    print(f"  {Colors.CYAN}2{Colors.RESET}  Backup database")
+    
+    db_choice = get_choice("Enter choice (1-2, q to quit):", 2)
+    if db_choice == -1:
+        print(f"\n{Colors.DIM}Goodbye!{Colors.RESET}\n")
+        return
+    
+    use_backup = db_choice == 2
+    
+    print(f"\n{Colors.DIM}Connecting to database...{Colors.RESET}")
+    conn = get_db_connection(use_backup)
+    if not conn:
+        return
+    
+    print(f"{Colors.DIM}Loading conversations...{Colors.RESET}")
+    conversations = list_conversations(conn)
+    
+    if not conversations:
+        print(f"{Colors.RED}No conversations found in database.{Colors.RESET}")
+        conn.close()
+        return
+    
+    while True:
+        clear_screen()
+        print_header()
+        
+        print(f"{Colors.BOLD}Found {len(conversations)} conversations:{Colors.RESET}\n")
+        
+        for i, conv in enumerate(conversations, 1):
+            name = conv['name'][:45] + "..." if len(conv['name']) > 45 else conv['name']
+            print(f"  {Colors.CYAN}{i:3}{Colors.RESET}  {name:<48} {Colors.DIM}│{Colors.RESET} {conv['msg_count']:3} msgs {Colors.DIM}│{Colors.RESET} {conv['created']}")
+        
+        print(f"\n{Colors.DIM}Enter number to select, q to quit{Colors.RESET}")
+        choice = get_choice("Select conversation:", len(conversations))
+        
+        if choice == -1:
+            break
+        
+        conv = conversations[choice - 1]
+        bubbles = get_bubbles(conn, conv["id"])
+        
+        while True:
+            clear_screen()
+            print_header()
+            display_conversation(conv, bubbles, full=False)
+            
+            print(f"\n{Colors.BOLD}Actions:{Colors.RESET}")
+            print(f"  {Colors.CYAN}1{Colors.RESET}  View full conversation")
+            print(f"  {Colors.CYAN}2{Colors.RESET}  Export to Markdown")
+            print(f"  {Colors.CYAN}3{Colors.RESET}  Extract plan (if exists)")
+            print(f"  {Colors.CYAN}4{Colors.RESET}  Back to list")
+            
+            action = get_choice("Select action (1-4):", 4)
+            
+            if action == 1:
+                clear_screen()
+                print_header()
+                display_conversation(conv, bubbles, full=True)
+                input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+            
+            elif action == 2:
+                safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in conv['name'])[:40]
+                default_path = os.path.expanduser(f"~/cursor_recovered_{safe_name}.md")
+                print(f"\n{Colors.DIM}Default: {default_path}{Colors.RESET}")
+                custom_path = input(f"{Colors.CYAN}Output path (Enter for default): {Colors.RESET}").strip()
+                output_path = custom_path if custom_path else default_path
+                export_conversation(conv, bubbles, output_path)
+                input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+            
+            elif action == 3:
+                plan = extract_plan(conv, bubbles)
+                if plan:
+                    print(f"\n{Colors.GREEN}✅ Found plan: {plan.get('name', 'Untitled')}{Colors.RESET}\n")
+                    print(f"{Colors.BOLD}Overview:{Colors.RESET} {plan.get('overview', '')}\n")
+                    
+                    todos = plan.get("todos", [])
+                    if todos:
+                        print(f"{Colors.BOLD}To-Dos ({len(todos)} items):{Colors.RESET}")
+                        for todo in todos[:10]:
+                            print(f"  ☐ {todo.get('content', '')}")
+                        if len(todos) > 10:
+                            print(f"  {Colors.DIM}... and {len(todos) - 10} more{Colors.RESET}")
+                    
+                    print(f"\n{Colors.BOLD}Save plan?{Colors.RESET}")
+                    print(f"  {Colors.CYAN}1{Colors.RESET}  Yes")
+                    print(f"  {Colors.CYAN}2{Colors.RESET}  No")
+                    
+                    save_choice = get_choice("Choice:", 2)
+                    if save_choice == 1:
+                        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in plan.get('name', 'plan'))[:40]
+                        output_path = os.path.expanduser(f"~/cursor_plan_{safe_name}.md")
+                        save_plan(plan, output_path)
+                else:
+                    print(f"\n{Colors.YELLOW}No plan found in this conversation.{Colors.RESET}")
+                
+                input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+            
+            elif action == 4 or action == -1:
+                break
+    
+    conn.close()
+    print(f"\n{Colors.DIM}Goodbye!{Colors.RESET}\n")
+
+
+if __name__ == "__main__":
+    main()
+
