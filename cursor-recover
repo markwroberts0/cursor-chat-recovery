@@ -69,6 +69,23 @@ def get_choice(prompt: str, max_val: int) -> int:
             print(f"{Colors.RED}Please enter a valid number{Colors.RESET}")
 
 
+def get_main_choice(prompt: str, max_val: int):
+    """Get a numeric choice, 'e' (export all), or 'q' (quit) from user."""
+    while True:
+        try:
+            choice = input(f"\n{Colors.CYAN}{prompt}{Colors.RESET} ").strip()
+            if choice.lower() == 'q':
+                return -1
+            if choice.lower() == 'e':
+                return 'e'
+            num = int(choice)
+            if 1 <= num <= max_val:
+                return num
+            print(f"{Colors.RED}Please enter a number between 1 and {max_val}{Colors.RESET}")
+        except ValueError:
+            print(f"{Colors.RED}Please enter a valid number, 'e' to export all, or 'q' to quit{Colors.RESET}")
+
+
 def get_db_connection(use_backup: bool = False) -> Optional[sqlite3.Connection]:
     """Get a database connection."""
     db_path = DB_PATH_BACKUP if use_backup else DB_PATH
@@ -263,7 +280,7 @@ def display_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], full: bo
         print(f"\n{Colors.YELLOW}... and {len(headers) - 10} more messages{Colors.RESET}")
 
 
-def export_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], output_path: str) -> None:
+def export_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], output_path: str, silent: bool = False) -> None:
     """Export conversation to markdown file."""
     headers = conv["data"].get("fullConversationHeadersOnly", [])
     
@@ -357,7 +374,8 @@ def export_conversation(conv: Dict[str, Any], bubbles: Dict[str, Any], output_pa
             
             f.write("---\n\n")
     
-    print(f"\n{Colors.GREEN}✅ Exported to: {output_path}{Colors.RESET}")
+    if not silent:
+        print(f"\n{Colors.GREEN}✅ Exported to: {output_path}{Colors.RESET}")
 
 
 def extract_plan(conv: Dict[str, Any], bubbles: Dict[str, Any]) -> Optional[Dict]:
@@ -389,6 +407,42 @@ def save_plan(plan: Dict, output_path: str) -> None:
             f.write(f"- [ ] **{todo.get('id')}**: {todo.get('content')}\n")
     
     print(f"\n{Colors.GREEN}✅ Plan saved to: {output_path}{Colors.RESET}")
+
+
+def export_all_conversations(conn: sqlite3.Connection, conversations: List[Dict[str, Any]]) -> None:
+    """Export every conversation to markdown files in a chosen output folder."""
+    total = len(conversations)
+    print(f"\n{Colors.BOLD}Export All Conversations{Colors.RESET}")
+    default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovered")
+    print(f"{Colors.DIM}Default output folder: {default_dir}{Colors.RESET}")
+    custom_dir = input(f"{Colors.CYAN}Output folder (press Enter for default): {Colors.RESET}").strip()
+    output_dir = custom_dir if custom_dir else default_dir
+
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\n{Colors.BOLD}Exporting {total} conversations to:{Colors.RESET} {Colors.CYAN}{output_dir}{Colors.RESET}\n")
+
+    failed = []
+    for i, conv in enumerate(conversations, 1):
+        safe_name = "".join(
+            c if c.isalnum() or c in " -_" else "_" for c in conv["name"]
+        )[:50].strip()
+        filename = f"{i:02d}_{safe_name}.md" if safe_name else f"{i:02d}_conversation.md"
+        output_path = os.path.join(output_dir, filename)
+
+        print(f"  {Colors.CYAN}[{i}/{total}]{Colors.RESET} {conv['name'][:55]}", end="", flush=True)
+        try:
+            bubbles = get_bubbles(conn, conv["id"])
+            export_conversation(conv, bubbles, output_path, silent=True)
+            print(f" {Colors.GREEN}✓{Colors.RESET}")
+        except Exception as e:
+            print(f" {Colors.RED}✗ {e}{Colors.RESET}")
+            failed.append(conv["name"])
+
+    success = total - len(failed)
+    print(f"\n{Colors.GREEN}{Colors.BOLD}✅ Done! Exported {success}/{total} conversations.{Colors.RESET}")
+    if failed:
+        print(f"{Colors.RED}Failed ({len(failed)}): {', '.join(failed)}{Colors.RESET}")
+    print(f"{Colors.DIM}Output folder: {output_dir}{Colors.RESET}")
 
 
 def main():
@@ -430,12 +484,17 @@ def main():
             name = conv['name'][:45] + "..." if len(conv['name']) > 45 else conv['name']
             print(f"  {Colors.CYAN}{i:3}{Colors.RESET}  {name:<48} {Colors.DIM}│{Colors.RESET} {conv['msg_count']:3} msgs {Colors.DIM}│{Colors.RESET} {conv['created']}")
         
-        print(f"\n{Colors.DIM}Enter number to select, q to quit{Colors.RESET}")
-        choice = get_choice("Select conversation:", len(conversations))
+        print(f"\n{Colors.DIM}Enter number to select, {Colors.RESET}{Colors.YELLOW}e{Colors.DIM} to export all, q to quit{Colors.RESET}")
+        choice = get_main_choice("Select conversation:", len(conversations))
         
         if choice == -1:
             break
         
+        if choice == 'e':
+            export_all_conversations(conn, conversations)
+            input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+            continue
+
         conv = conversations[choice - 1]
         bubbles = get_bubbles(conn, conv["id"])
         
