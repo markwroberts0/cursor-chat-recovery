@@ -13,6 +13,7 @@ Ever lost a chat or plan in Cursor? This tool lets you browse and export all you
 - 📋 **List all conversations** — Browse your entire chat history
 - 🔍 **View conversations** — Preview or view full conversation with tool calls
 - 📤 **Export to Markdown** — Save conversations as formatted `.md` files
+- 📦 **Export all at once** — Bulk-export every conversation to a folder in one go
 - 📝 **Extract plans** — Pull out Plan Mode plans with to-do lists
 - 🔧 **Tool call support** — See all AI tool calls (file edits, terminal commands, etc.)
 - 🎨 **Beautiful CLI** — Clean, colorful terminal interface
@@ -74,6 +75,12 @@ Once you select a conversation:
 2. **Export to Markdown** — Save as a formatted `.md` file
 3. **Extract plan** — If the conversation has a Plan Mode plan, extract it
 4. **Back to list** — Return to conversation list
+
+Or from the conversation list, press **`e`** to **Export All**:
+
+- You'll be prompted for an output folder (defaults to `./recovered/` next to the script)
+- Every conversation is exported as a numbered, named `.md` file: `01_My_Project.md`, `02_Another_Chat.md`, …
+- Live progress is shown for each conversation
 
 ## 📁 What Gets Recovered
 
